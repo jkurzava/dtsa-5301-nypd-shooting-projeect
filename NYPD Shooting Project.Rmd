@@ -1,0 +1,139 @@
+---
+title: "NYPD Shooting Incident Project"
+author: "J. Kurzava"
+date: "2023-11-29"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Import the Data
+
+```{r import_libraries, echo=FALSE}
+library(tidyverse)
+library(lubridate)
+library(dplyr)
+library(ggplot2)
+```
+
+```{r import_data}
+file_url <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+data <- readr::read_csv(file_url)
+
+```
+
+## Tidying and Transforming the Data
+
+```{r remove_cols}
+data <- data %>% select (-c(INCIDENT_KEY, LOC_OF_OCCUR_DESC, , LOC_CLASSFCTN_DESC,
+                            LOCATION_DESC, X_COORD_CD, Y_COORD_CD, Latitude, Longitude, Lon_Lat)) %>%
+  mutate(OCCUR_DATE = mdy(OCCUR_DATE))
+summary(data)
+
+na_count <- data %>%
+  summarise(across(everything(), ~sum(is.na(.))))
+print(na_count)
+```
+
+There are two NAs in the jurisdiction code column and roughlly 9300 NAs in the PERP_AGE_GROUP, PERP_SEX, and PERP_RACE column. For the jurisiction code, it's a very low number so I will just delete the two rows. For the PERP columns with NAs, I'm going to assume that they're NA because the perpetrator was not found and replace the NAs with "Unknown" 
+
+```{r handle_nas}
+data <- data %>%
+  mutate(across(c(PERP_AGE_GROUP, PERP_SEX, PERP_RACE), ~if_else(is.na(.), "Unknown", .))) %>%
+  filter(complete.cases(.))
+```
+
+
+
+## Visualizing Data
+
+```{r first_viz}
+shootings_by_boro <- data %>%
+  group_by(OCCUR_DATE, BORO) %>%
+  summarise(COUNT_SHOOTINGS = n(), .groups = "drop")
+
+shootings_by_boro %>%
+  ggplot(aes(x = OCCUR_DATE, y = COUNT_SHOOTINGS)) + 
+  geom_line(aes(color = BORO)) + 
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle=90)) + 
+  labs(title = "Shootings per NYC Borough", y=NULL)
+```
+
+While some information can be inferred from this chart, such as Brooklyn having a higher number of shootings compared staten island, it's pretty tough to read. To make it easier, I'll aggregate it by Month
+
+```{r second_viz}
+shootings_by_boro_month <- data %>%
+  mutate(Month_Year = floor_date(OCCUR_DATE, "month")) %>%
+  group_by(Month_Year, BORO) %>%
+  summarise(COUNT_SHOOTINGS = n(), .groups = "drop")
+
+shootings_by_boro_month %>%
+  ggplot(aes(x = Month_Year, y = COUNT_SHOOTINGS)) + 
+  geom_line(aes(color = BORO)) + 
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle=90)) + 
+  labs(title = "Shootings per NYC Borough per Month", y=NULL)
+
+```
+
+Now the data is much more clear to read. It looks like shootings were trending downward overall from the beginning of the data in 2003 until 2020 when there was a big spike, followed by a higher number overall compared to the previous 5 years, which raises the question what the reason behind the increase could be
+
+## Model
+
+I'll use a simple linear model on the total shootings for NYC in order to help keep the data as simple as possible. 
+
+```{r model}
+shootings_by_month <- data %>%
+  mutate(Month_Year = floor_date(OCCUR_DATE, "month")) %>%
+  group_by(Month_Year) %>%
+  summarise(COUNT_SHOOTINGS = n(), .groups = "drop")
+
+mod <- lm(COUNT_SHOOTINGS ~ Month_Year, data = shootings_by_month)
+summary(mod)
+shootings_by_month_with_preds <- shootings_by_month %>% mutate(pred = predict(mod))
+
+shootings_by_month_with_preds %>%
+  ggplot() + 
+  geom_line(aes(x=Month_Year, y = COUNT_SHOOTINGS), color="blue") +
+  geom_line(aes(x=Month_Year, y = pred), color="yellow")
+theme(legend.position = "bottom",
+      axis.text.x = element_text(angle=90)) + 
+  labs(title = "Shootings per NYC per Month", y=NULL)
+
+```
+
+
+## Deeper Dive into 2020 Spike
+
+Take a closer look at shootings by borough. Particular year over year percent changes. As you saw in the graph, shootings were trending downwards until 2020 when there was a big spike. Isolating the 2020 data, we can see that shootings in all five bouroughs were up more than 87% year over year, with Brooklyn seeing the largest increase at 120%!
+
+```{r 2020}
+shootings_by_boro_year <- shootings_by_boro_month %>%
+  mutate(year = year(ymd(Month_Year))) %>%
+  group_by(BORO, year) %>%
+  summarize(total_shootings = sum(COUNT_SHOOTINGS, na.rm = TRUE))
+
+shootings_by_boro_year <- shootings_by_boro_year %>%
+  arrange(BORO, year) %>%
+  group_by(BORO) %>%
+  mutate(previous_shootings = lag(total_shootings),
+         percent_change = ((total_shootings-previous_shootings) / previous_shootings) * 100) %>%
+  select(-previous_shootings)
+print(shootings_by_boro_year)
+
+shootings_by_boro_year_2020 <- shootings_by_boro_year %>%
+  filter(year == 2020)
+
+print(shootings_by_boro_year_2020)
+
+```
+
+
+## Bias
+
+In terms of bias for this analysis, I'd argue that the largest source of bias comes from how the data is collected. Some areas may do a better job of accurately collecting and logging data then others. Additionally the analysis was based off the raw shooting numbers and not based on shootings per 100,000 people, for example. Brooklyn has significantly more shootings than Staten Island, but that doesn't necessarily mean a person is more likely to be shot there, as Brooklyn has more than 5x the population of Staten Island. In terms of personal bias, this is a pretty simple analysis so I don't think that plays a big role.
